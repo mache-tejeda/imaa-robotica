@@ -3,46 +3,60 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>IMAA Robótica · Prueba WebXR</title>
+<title>IMAA Robótica · Brazo de 2 articulaciones</title>
 <style>
   :root {
     --fondo: #1d2733;
     --panel: #26323f;
     --texto: #e8edf2;
     --tenue: #9fb0c0;
-    --ok: #5fd08a;
-    --mal: #ff7a6b;
-    --aviso: #f2c14e;
-    box-sizing: border-box;
-    padding-top: env(safe-area-inset-top, 0px);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    --rojo: #ff7a6b;
+    --verde: #5fd08a;
   }
   html, body { height: 100%; margin: 0; }
   body {
-    background: var(--fondo);
-    color: var(--texto);
+    background: var(--fondo); color: var(--texto);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     overflow: hidden;
   }
-  #panel {
-    position: absolute; top: env(safe-area-inset-top, 0px); left: 0;
-    margin: 16px; padding: 14px 18px; max-width: min(460px, calc(100% - 32px));
-    background: var(--panel); border-radius: 10px; font-size: 15px; line-height: 1.45;
-    z-index: 5;
+  canvas#escena { display: block; }
+  #panelMatrices {
+    position: absolute; top: 12px; right: 12px;
+    width: min(460px, 42vw); height: auto;
+    border-radius: 10px; z-index: 5;
   }
-  #panel h1 { font-size: 18px; margin: 0 0 8px; font-weight: 600; }
-  #panel p { margin: 0 0 10px; color: var(--tenue); }
-  #diag { list-style: none; padding: 0; margin: 0; }
-  #diag li { padding: 3px 0; }
-  .ok { color: var(--ok); } .mal { color: var(--mal); } .aviso { color: var(--aviso); }
-  canvas { display: block; }
+  #controles {
+    position: absolute; left: 12px; bottom: 80px; z-index: 5;
+    background: var(--panel); border-radius: 10px; padding: 12px 16px;
+    width: min(360px, calc(100% - 24px)); box-sizing: border-box; font-size: 15px;
+  }
+  #controles label { display: block; margin: 4px 0 2px; }
+  #controles input[type=range] { width: 100%; }
+  #controles .botones { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  #controles button {
+    background: #3a4a5a; color: var(--texto); border: 0; border-radius: 6px;
+    padding: 7px 12px; font-size: 14px; cursor: pointer;
+  }
+  #controles button:focus-visible, #controles input:focus-visible { outline: 2px solid var(--verde); outline-offset: 2px; }
+  #controles button.activo { background: #2f6f4a; }
+  @media (max-width: 700px) {
+    #panelMatrices { width: calc(100% - 24px); left: 12px; right: auto; }
+    #controles { bottom: 70px; }
+  }
 </style>
 </head>
 <body>
-<div id="panel">
-  <h1>Prueba WebXR – IMAA Robótica</h1>
-  <p>Pulsa “ENTER VR” abajo. Dentro, apunta al cubo y presiona el gatillo: debe cambiar de color.</p>
-  <ul id="diag"><li>Revisando compatibilidad…</li></ul>
+
+<div id="controles">
+  <label for="t1">Hombro θ₁: <span id="v1"></span></label>
+  <input id="t1" type="range" min="-180" max="180" step="0.5">
+  <label for="t2">Codo θ₂: <span id="v2"></span></label>
+  <input id="t2" type="range" min="-180" max="180" step="0.5">
+  <div class="botones">
+    <button id="bAuto">Movimiento automático</button>
+    <button id="bBorrar">Borrar trayectoria</button>
+    <button id="bReiniciar">Reiniciar</button>
+  </div>
 </div>
 
 <script type="importmap">
@@ -56,39 +70,20 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// ---------- Diagnóstico ----------
-const diag = document.getElementById('diag');
-const linea = (clase, texto) => `<li class="${clase}">${texto}</li>`;
-async function diagnosticar() {
-  const items = [];
-  items.push(window.isSecureContext
-    ? linea('ok', '✔ Conexión segura (https)')
-    : linea('mal', '✘ Sin https: WebXR no funcionará'));
-  let enMarco = false;
-  try { enMarco = window.self !== window.top; } catch (e) { enMarco = true; }
-  items.push(enMarco
-    ? linea('aviso', '⚠ La página está dentro de un marco (iframe)')
-    : linea('ok', '✔ Página abierta directamente'));
-  if (!('xr' in navigator)) {
-    items.push(linea('mal', '✘ Este navegador no expone WebXR'));
-  } else {
-    items.push(linea('ok', '✔ WebXR disponible'));
-    try {
-      const vr = await navigator.xr.isSessionSupported('immersive-vr');
-      items.push(vr
-        ? linea('ok', '✔ Modo VR inmersivo soportado')
-        : linea('mal', '✘ Modo VR inmersivo no soportado aquí'));
-    } catch (e) {
-      items.push(linea('mal', '✘ VR bloqueado: ' + e.message));
-    }
-  }
-  diag.innerHTML = items.join('');
-}
-diagnosticar();
+// ================= Parámetros del brazo =================
+const L1 = 0.40, L2 = 0.30;             // longitudes en metros
+const ANG_INICIAL = [30, 45];           // grados
+const estado = { t1: ANG_INICIAL[0], t2: ANG_INICIAL[1], auto: false, cambio: true, unControl: true };
+const ROJO = 0xff7a6b, VERDE = 0x5fd08a;
 
-// ---------- Escena ----------
+const rad = g => g * Math.PI / 180;
+const normaliza = g => { let a = ((g + 180) % 360 + 360) % 360 - 180; return a === -180 ? 180 : a; };
+
+// ================= Render y escena =================
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.domElement.id = 'escena';
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.xr.enabled = true;
@@ -97,79 +92,300 @@ document.body.appendChild(VRButton.createButton(renderer));
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1d2733);
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.05, 50);
+camera.position.set(0.25, 1.25, 0.9);
 
-const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 50);
-camera.position.set(0, 1.6, 0.5);
+const orbita = new OrbitControls(camera, renderer.domElement);
+orbita.target.set(0.15, 1.1, -1.2);
+orbita.update();
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.2));
-const sol = new THREE.DirectionalLight(0xffffff, 1.5);
-sol.position.set(2, 4, 2);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.1));
+const sol = new THREE.DirectionalLight(0xffffff, 1.6);
+sol.position.set(1, 3, 2);
 scene.add(sol);
-
-// Piso con cuadrícula de 1 m
 scene.add(new THREE.GridHelper(10, 10, 0x6f8499, 0x3a4a5a));
 
-// Ejes de referencia (X rojo, Y verde, Z azul) — útiles para las matrices después
-const ejes = new THREE.AxesHelper(0.5);
-ejes.position.set(-0.6, 0.01, -1.2);
-scene.add(ejes);
+// ================= Brazo (jerarquía = producto de matrices) =================
+const BASE = new THREE.Vector3(-0.25, 1.0, -1.2);
+const base = new THREE.Group();
+base.position.copy(BASE);
+scene.add(base);
 
-// Cubo objetivo a 1.2 m al frente, altura del pecho
-const colores = [0x4fa3e0, 0xf2c14e, 0x5fd08a, 0xff7a6b];
-let indiceColor = 0;
-const cubo = new THREE.Mesh(
-  new THREE.BoxGeometry(0.3, 0.3, 0.3),
-  new THREE.MeshStandardMaterial({ color: colores[0], roughness: 0.4 })
-);
-cubo.position.set(0, 1.3, -1.2);
-scene.add(cubo);
+// Cuadrícula vertical del plano de trabajo (cada cuadro = 0.1 m)
+const rejilla = new THREE.GridHelper(1.6, 16, 0x55687b, 0x33414f);
+rejilla.rotation.x = Math.PI / 2;
+rejilla.position.z = -0.03;
+base.add(rejilla);
 
-// ---------- Controles ----------
-const raycaster = new THREE.Raycaster();
-const matrizTemp = new THREE.Matrix4();
-const fabrica = new XRControllerModelFactory();
+// Ejes fijos del mundo en el hombro (gris)
+base.add(new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 0.8, 0x8a9aab, 0.03, 0.02));
+base.add(new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(), 0.8, 0x8a9aab, 0.03, 0.02));
 
-function crearRayo() {
-  const geo = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)
-  ]);
-  const rayo = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffffff }));
-  rayo.scale.z = 3;
-  return rayo;
+// Pedestal
+const matMetal = new THREE.MeshStandardMaterial({ color: 0xb8c2cc, metalness: 0.3, roughness: 0.45 });
+const matJunta = new THREE.MeshStandardMaterial({ color: 0x4fa3e0, roughness: 0.4 });
+const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.08, BASE.y, 24), matMetal);
+pedestal.position.set(0, -BASE.y / 2, -0.06);
+base.add(pedestal);
+
+function crearJunta() {
+  const j = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.08, 24), matJunta);
+  j.rotation.x = Math.PI / 2;
+  return j;
+}
+function crearEslabon(L) {
+  const e = new THREE.Mesh(new THREE.BoxGeometry(L, 0.045, 0.045), matMetal);
+  e.position.x = L / 2;
+  return e;
+}
+function crearEjesLocales(grupo) {
+  grupo.add(new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0.05), 0.2, ROJO, 0.05, 0.03));
+  grupo.add(new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 0.05), 0.2, VERDE, 0.05, 0.03));
 }
 
-function alPresionar(evento) {
-  const control = evento.target;
-  matrizTemp.identity().extractRotation(control.matrixWorld);
-  raycaster.ray.origin.setFromMatrixPosition(control.matrixWorld);
-  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(matrizTemp);
-  if (raycaster.intersectObject(cubo).length > 0) {
-    indiceColor = (indiceColor + 1) % colores.length;
-    cubo.material.color.setHex(colores[indiceColor]);
+const art1 = new THREE.Group();          // hombro: rota θ1
+base.add(art1);
+art1.add(crearJunta(), crearEslabon(L1));
+crearEjesLocales(art1);
+
+const art2 = new THREE.Group();          // codo: rota θ2 respecto al eslabón 1
+art2.position.x = L1;
+art1.add(art2);
+art2.add(crearJunta(), crearEslabon(L2));
+crearEjesLocales(art2);
+
+const efector = new THREE.Mesh(new THREE.SphereGeometry(0.03, 20, 16),
+  new THREE.MeshStandardMaterial({ color: 0xf2c14e, emissive: 0x5a4210 }));
+efector.position.x = L2;
+art2.add(efector);
+
+// ================= Trayectoria del extremo =================
+const MAX_PTS = 4000;
+const ptsTray = new Float32Array(MAX_PTS * 3);
+let nTray = 0;
+const geoTray = new THREE.BufferGeometry();
+geoTray.setAttribute('position', new THREE.BufferAttribute(ptsTray, 3));
+geoTray.setDrawRange(0, 0);
+const trayectoria = new THREE.Line(geoTray, new THREE.LineBasicMaterial({ color: 0xf2c14e }));
+trayectoria.frustumCulled = false;
+scene.add(trayectoria);
+const posEf = new THREE.Vector3(), ultimo = new THREE.Vector3(1e9, 0, 0);
+
+function agregarPunto() {
+  efector.getWorldPosition(posEf);
+  if (posEf.distanceTo(ultimo) < 0.002) return;
+  ultimo.copy(posEf);
+  if (nTray === MAX_PTS) { ptsTray.copyWithin(0, 3); nTray--; }
+  ptsTray.set([posEf.x, posEf.y, posEf.z], nTray * 3);
+  nTray++;
+  geoTray.setDrawRange(0, nTray);
+  geoTray.attributes.position.needsUpdate = true;
+}
+function borrarTrayectoria() {
+  nTray = 0; geoTray.setDrawRange(0, 0); ultimo.set(1e9, 0, 0);
+}
+
+// ================= Panel de matrices (canvas: DOM en escritorio, textura en VR) =================
+const lienzo = document.createElement('canvas');
+lienzo.id = 'panelMatrices';
+lienzo.width = 1024; lienzo.height = 1100;
+document.body.appendChild(lienzo);
+const ctx = lienzo.getContext('2d');
+const texPanel = new THREE.CanvasTexture(lienzo);
+texPanel.colorSpace = THREE.SRGBColorSpace;
+texPanel.anisotropy = 4;
+const panel3D = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.9 * 1100 / 1024),
+  new THREE.MeshBasicMaterial({ map: texPanel }));
+panel3D.position.set(0.95, 1.25, -1.05);
+panel3D.rotation.y = -0.73; // orientado hacia el usuario
+scene.add(panel3D);
+
+const C = { fondo: '#222d39', texto: '#e8edf2', tenue: '#9fb0c0', rojo: '#ff7a6b', verde: '#5fd08a', amarillo: '#f2c14e' };
+const FUENTE = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const fmt = (v, d = 3) => {
+  const s = Math.abs(v).toFixed(d);
+  return (v < 0 && Number(s) !== 0 ? '−' : '') + s;
+};
+
+function dibujaMatriz(x0, y0, etiqueta, m, colores) {
+  // m = [[a,b],[c,d]]; colores = [colorCol1, colorCol2]
+  ctx.textAlign = 'left';
+  ctx.fillStyle = C.texto;
+  ctx.font = `600 34px ${FUENTE}`;
+  ctx.fillText(etiqueta, x0, y0);
+  const top = y0 + 20, alto = 120, ancho = 295;
+  ctx.strokeStyle = C.texto; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x0 + 18, top); ctx.lineTo(x0 + 4, top); ctx.lineTo(x0 + 4, top + alto); ctx.lineTo(x0 + 18, top + alto);
+  ctx.moveTo(x0 + ancho - 18, top); ctx.lineTo(x0 + ancho - 4, top); ctx.lineTo(x0 + ancho - 4, top + alto); ctx.lineTo(x0 + ancho - 18, top + alto);
+  ctx.stroke();
+  ctx.font = `34px ${FUENTE}`;
+  ctx.textAlign = 'right';
+  const colX = [x0 + 140, x0 + 274];
+  for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) {
+    ctx.fillStyle = colores[j];
+    ctx.fillText(fmt(m[i][j]), colX[j], top + 48 + i * 52);
   }
 }
 
-for (let i = 0; i < 2; i++) {
-  const control = renderer.xr.getController(i);
-  control.addEventListener('selectstart', alPresionar);
-  control.add(crearRayo());
-  scene.add(control);
+function dibujarPanel() {
+  const t1 = estado.t1, t2 = estado.t2, t12 = normaliza(t1 + t2);
+  const c1 = Math.cos(rad(t1)), s1 = Math.sin(rad(t1));
+  const c2 = Math.cos(rad(t2)), s2 = Math.sin(rad(t2));
+  const c12 = Math.cos(rad(t1 + t2)), s12 = Math.sin(rad(t1 + t2));
+  const x = L1 * c1 + L2 * c12, y = L1 * s1 + L2 * s12;
 
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = C.fondo;
+  ctx.fillRect(0, 0, 1024, 1100);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = C.amarillo; ctx.font = `700 34px ${FUENTE}`;
+  ctx.fillText('IMAA Robótica', 40, 52);
+  ctx.translate(0, 45);
+
+  ctx.fillStyle = C.texto; ctx.font = `600 44px ${FUENTE}`;
+  ctx.fillText('Cinemática directa', 40, 70);
+  ctx.fillStyle = C.tenue; ctx.font = `28px ${FUENTE}`;
+  ctx.fillText(`Brazo plano de 2 articulaciones   L₁ = ${L1.toFixed(2)} m   L₂ = ${L2.toFixed(2)} m`, 40, 112);
+
+  ctx.fillStyle = C.texto; ctx.font = `36px ${FUENTE}`;
+  ctx.fillText(`θ₁ = ${fmt(t1, 1)}°     θ₂ = ${fmt(t2, 1)}°     θ₁+θ₂ = ${fmt(t12, 1)}°`, 40, 172);
+
+  dibujaMatriz(30, 245, 'R(θ₁)', [[c1, -s1], [s1, c1]], [C.rojo, C.verde]);
+  dibujaMatriz(360, 245, 'R(θ₂)', [[c2, -s2], [s2, c2]], [C.texto, C.texto]);
+  dibujaMatriz(690, 245, 'R(θ₁)·R(θ₂)', [[c1 * c2 - s1 * s2, -(c1 * s2 + s1 * c2)], [s1 * c2 + c1 * s2, c1 * c2 - s1 * s2]], [C.rojo, C.verde]);
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = C.tenue; ctx.font = `28px ${FUENTE}`;
+  ctx.fillText('R(θ₁)·R(θ₂) = R(θ₁+θ₂): girar θ₁ y luego θ₂ equivale a girar la suma.', 40, 440);
+  ctx.fillText('Las columnas de color son las flechas que ves en cada articulación.', 40, 485);
+
+  ctx.fillStyle = C.amarillo; ctx.font = `600 34px ${FUENTE}`;
+  ctx.fillText('Posición del extremo (origen en el hombro)', 40, 560);
+  ctx.fillStyle = C.texto; ctx.font = `34px ${FUENTE}`;
+  ctx.fillText('x = L₁ cos θ₁ + L₂ cos(θ₁+θ₂)', 40, 612);
+  ctx.fillText(`   = ${L1.toFixed(2)}(${fmt(c1)}) + ${L2.toFixed(2)}(${fmt(c12)}) = ${fmt(x)} m`, 40, 656);
+  ctx.fillText('y = L₁ sen θ₁ + L₂ sen(θ₁+θ₂)', 40, 716);
+  ctx.fillText(`   = ${L1.toFixed(2)}(${fmt(s1)}) + ${L2.toFixed(2)}(${fmt(s12)}) = ${fmt(y)} m`, 40, 760);
+
+  ctx.fillStyle = C.tenue; ctx.font = `28px ${FUENTE}`;
+  ctx.fillText('Es decir: L₁ por la columna roja de R(θ₁)', 40, 818);
+  ctx.fillText('más L₂ por la columna roja de R(θ₁)·R(θ₂).', 40, 852);
+
+  ctx.font = `24px ${FUENTE}`;
+  if (estado.unControl) {
+    ctx.fillStyle = C.texto;
+    ctx.fillText('Modo VR: un control (derecho). Botón lateral derecho: cambiar a dos controles.', 40, 925);
+    ctx.fillStyle = C.tenue;
+    ctx.fillText('Stick derecho: a los lados mueve el hombro; arriba o abajo, el codo.', 40, 959);
+    ctx.fillText('Gatillo: movimiento automático.  A: borrar trayectoria.  B: reiniciar.', 40, 993);
+  } else {
+    ctx.fillStyle = C.texto;
+    ctx.fillText('Modo VR: dos controles. Botón lateral derecho: cambiar a un control.', 40, 925);
+    ctx.fillStyle = C.tenue;
+    ctx.fillText('Stick izquierdo: hombro.  Stick derecho: codo.', 40, 959);
+    ctx.fillText('Gatillo: movimiento automático.  A o X: borrar trayectoria.  B o Y: reiniciar.', 40, 993);
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  texPanel.needsUpdate = true;
+}
+
+// ================= Controles de escritorio =================
+const s1El = document.getElementById('t1'), s2El = document.getElementById('t2');
+const v1El = document.getElementById('v1'), v2El = document.getElementById('v2');
+const bAuto = document.getElementById('bAuto');
+
+function sincronizarUI() {
+  s1El.value = normaliza(estado.t1); s2El.value = normaliza(estado.t2);
+  v1El.textContent = fmt(normaliza(estado.t1), 1) + '°';
+  v2El.textContent = fmt(normaliza(estado.t2), 1) + '°';
+  bAuto.classList.toggle('activo', estado.auto);
+  bAuto.textContent = estado.auto ? 'Detener movimiento' : 'Movimiento automático';
+}
+s1El.addEventListener('input', () => { estado.t1 = Number(s1El.value); estado.cambio = true; });
+s2El.addEventListener('input', () => { estado.t2 = Number(s2El.value); estado.cambio = true; });
+bAuto.addEventListener('click', () => { estado.auto = !estado.auto; sincronizarUI(); });
+document.getElementById('bBorrar').addEventListener('click', borrarTrayectoria);
+function reiniciar() {
+  estado.t1 = ANG_INICIAL[0]; estado.t2 = ANG_INICIAL[1]; estado.auto = false; estado.cambio = true;
+  borrarTrayectoria(); sincronizarUI();
+}
+document.getElementById('bReiniciar').addEventListener('click', reiniciar);
+
+// ================= Controles de VR =================
+const fabrica = new XRControllerModelFactory();
+for (let i = 0; i < 2; i++) {
   const agarre = renderer.xr.getControllerGrip(i);
   agarre.add(fabrica.createControllerModel(agarre));
   scene.add(agarre);
 }
+const previos = { left: [], right: [] };
+const ZONA_MUERTA = 0.15, VEL = 70; // grados por segundo con el stick al máximo
 
-// ---------- Bucle ----------
+function leerControlesVR(dt) {
+  const sesion = renderer.xr.getSession();
+  if (!sesion) return;
+  for (const fuente of sesion.inputSources) {
+    const gp = fuente.gamepad, mano = fuente.handedness;
+    if (!gp || (mano !== 'left' && mano !== 'right')) continue;
+    const ejeX = gp.axes.length >= 4 ? gp.axes[2] : (gp.axes[0] || 0);
+    const ejeY = gp.axes.length >= 4 ? gp.axes[3] : (gp.axes[1] || 0);
+    if (estado.unControl) {
+      // Solo el control derecho: el eje dominante decide qué articulación se mueve
+      if (mano === 'right') {
+        if (Math.abs(ejeX) > ZONA_MUERTA && Math.abs(ejeX) >= Math.abs(ejeY)) {
+          estado.t1 += -ejeX * VEL * dt;   // derecha = giro horario del hombro
+          estado.cambio = true;
+        } else if (Math.abs(ejeY) > ZONA_MUERTA) {
+          estado.t2 += -ejeY * VEL * dt;   // arriba = giro antihorario del codo
+          estado.cambio = true;
+        }
+      }
+    } else if (Math.abs(ejeX) > ZONA_MUERTA) {
+      const delta = -ejeX * VEL * dt; // stick a la derecha = giro horario
+      if (mano === 'left') estado.t1 += delta; else estado.t2 += delta;
+      estado.cambio = true;
+    }
+    const pulsado = k => !!(gp.buttons[k] && gp.buttons[k].pressed);
+    const flanco = k => pulsado(k) && !previos[mano][k];
+    if (flanco(0)) { estado.auto = !estado.auto; sincronizarUI(); }
+    if (flanco(4)) borrarTrayectoria();
+    if (flanco(5)) reiniciar();
+    if (mano === 'right' && flanco(1)) { estado.unControl = !estado.unControl; estado.cambio = true; }
+    previos[mano] = gp.buttons.map(b => b.pressed);
+  }
+}
+
+// ================= Bucle =================
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+const reloj = new THREE.Clock();
+sincronizarUI();
 renderer.setAnimationLoop(() => {
-  cubo.rotation.y += 0.01;
-  cubo.rotation.x += 0.005;
+  const dt = Math.min(reloj.getDelta(), 0.1);
+  leerControlesVR(dt);
+  if (estado.auto) {
+    estado.t1 += 20 * dt;
+    estado.t2 += 70 * dt;
+    estado.cambio = true;
+  }
+  if (estado.cambio) {
+    estado.t1 = normaliza(estado.t1); estado.t2 = normaliza(estado.t2);
+    art1.rotation.z = rad(estado.t1);
+    art2.rotation.z = rad(estado.t2);
+    base.updateMatrixWorld(true);
+    agregarPunto();
+    dibujarPanel();
+    if (!renderer.xr.isPresenting) sincronizarUI();
+    estado.cambio = false;
+  }
+  panel3D.visible = renderer.xr.isPresenting;
+  if (!renderer.xr.isPresenting) orbita.update();
   renderer.render(scene, camera);
 });
 </script>
