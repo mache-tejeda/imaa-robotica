@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IMAA Robótica · Prueba WebXR</title>
+<style>
+  :root {
+    --fondo: #1d2733;
+    --panel: #26323f;
+    --texto: #e8edf2;
+    --tenue: #9fb0c0;
+    --ok: #5fd08a;
+    --mal: #ff7a6b;
+    --aviso: #f2c14e;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--fondo);
+    color: var(--texto);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+  }
+  #panel {
+    position: absolute; top: env(safe-area-inset-top, 0px); left: 0;
+    margin: 16px; padding: 14px 18px; max-width: min(460px, calc(100% - 32px));
+    background: var(--panel); border-radius: 10px; font-size: 15px; line-height: 1.45;
+    z-index: 5;
+  }
+  #panel h1 { font-size: 18px; margin: 0 0 8px; font-weight: 600; }
+  #panel p { margin: 0 0 10px; color: var(--tenue); }
+  #diag { list-style: none; padding: 0; margin: 0; }
+  #diag li { padding: 3px 0; }
+  .ok { color: var(--ok); } .mal { color: var(--mal); } .aviso { color: var(--aviso); }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <h1>Prueba WebXR – IMAA Robótica</h1>
+  <p>Pulsa “ENTER VR” abajo. Dentro, apunta al cubo y presiona el gatillo: debe cambiar de color.</p>
+  <ul id="diag"><li>Revisando compatibilidad…</li></ul>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+// ---------- Diagnóstico ----------
+const diag = document.getElementById('diag');
+const linea = (clase, texto) => `<li class="${clase}">${texto}</li>`;
+async function diagnosticar() {
+  const items = [];
+  items.push(window.isSecureContext
+    ? linea('ok', '✔ Conexión segura (https)')
+    : linea('mal', '✘ Sin https: WebXR no funcionará'));
+  let enMarco = false;
+  try { enMarco = window.self !== window.top; } catch (e) { enMarco = true; }
+  items.push(enMarco
+    ? linea('aviso', '⚠ La página está dentro de un marco (iframe)')
+    : linea('ok', '✔ Página abierta directamente'));
+  if (!('xr' in navigator)) {
+    items.push(linea('mal', '✘ Este navegador no expone WebXR'));
+  } else {
+    items.push(linea('ok', '✔ WebXR disponible'));
+    try {
+      const vr = await navigator.xr.isSessionSupported('immersive-vr');
+      items.push(vr
+        ? linea('ok', '✔ Modo VR inmersivo soportado')
+        : linea('mal', '✘ Modo VR inmersivo no soportado aquí'));
+    } catch (e) {
+      items.push(linea('mal', '✘ VR bloqueado: ' + e.message));
+    }
+  }
+  diag.innerHTML = items.join('');
+}
+diagnosticar();
+
+// ---------- Escena ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1d2733);
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 50);
+camera.position.set(0, 1.6, 0.5);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.2));
+const sol = new THREE.DirectionalLight(0xffffff, 1.5);
+sol.position.set(2, 4, 2);
+scene.add(sol);
+
+// Piso con cuadrícula de 1 m
+scene.add(new THREE.GridHelper(10, 10, 0x6f8499, 0x3a4a5a));
+
+// Ejes de referencia (X rojo, Y verde, Z azul) — útiles para las matrices después
+const ejes = new THREE.AxesHelper(0.5);
+ejes.position.set(-0.6, 0.01, -1.2);
+scene.add(ejes);
+
+// Cubo objetivo a 1.2 m al frente, altura del pecho
+const colores = [0x4fa3e0, 0xf2c14e, 0x5fd08a, 0xff7a6b];
+let indiceColor = 0;
+const cubo = new THREE.Mesh(
+  new THREE.BoxGeometry(0.3, 0.3, 0.3),
+  new THREE.MeshStandardMaterial({ color: colores[0], roughness: 0.4 })
+);
+cubo.position.set(0, 1.3, -1.2);
+scene.add(cubo);
+
+// ---------- Controles ----------
+const raycaster = new THREE.Raycaster();
+const matrizTemp = new THREE.Matrix4();
+const fabrica = new XRControllerModelFactory();
+
+function crearRayo() {
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)
+  ]);
+  const rayo = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffffff }));
+  rayo.scale.z = 3;
+  return rayo;
+}
+
+function alPresionar(evento) {
+  const control = evento.target;
+  matrizTemp.identity().extractRotation(control.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(control.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(matrizTemp);
+  if (raycaster.intersectObject(cubo).length > 0) {
+    indiceColor = (indiceColor + 1) % colores.length;
+    cubo.material.color.setHex(colores[indiceColor]);
+  }
+}
+
+for (let i = 0; i < 2; i++) {
+  const control = renderer.xr.getController(i);
+  control.addEventListener('selectstart', alPresionar);
+  control.add(crearRayo());
+  scene.add(control);
+
+  const agarre = renderer.xr.getControllerGrip(i);
+  agarre.add(fabrica.createControllerModel(agarre));
+  scene.add(agarre);
+}
+
+// ---------- Bucle ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  cubo.rotation.y += 0.01;
+  cubo.rotation.x += 0.005;
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
